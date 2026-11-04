@@ -4,14 +4,17 @@ import {
   Post,
   Delete,
   Param,
+  Res,
   UseInterceptors,
   UploadedFile,
   BadRequestException,
   NotFoundException,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
 import { extname } from 'path';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import {
   ApiTags,
   ApiOperation,
@@ -29,7 +32,10 @@ import {
 @ApiTags('Templates')
 @Controller('templates')
 export class TemplateController {
-  constructor(private readonly templateService: TemplateService) {}
+  constructor(
+    private readonly templateService: TemplateService,
+    private readonly eventEmitter: EventEmitter2,
+  ) {}
 
   /**
    * GET /templates
@@ -115,6 +121,12 @@ export class TemplateController {
 
     const templateInfo = this.templateService.getTemplateInfo(file.filename);
 
+    this.eventEmitter.emit('plantilla.creada', {
+      id: templateInfo.id,
+      name: templateInfo.name,
+      extension: templateInfo.extension,
+    });
+
     return {
       success: true,
       data: {
@@ -127,6 +139,40 @@ export class TemplateController {
         },
       },
     };
+  }
+
+  /**
+   * GET /templates/download/:id
+   * Download template file by ID
+   */
+  @Get('download/:id')
+  @ApiOperation({ summary: 'Descargar archivo de template por ID' })
+  @ApiParam({ name: 'id', description: 'ID del template (nombre con o sin extensión)' })
+  @ApiResponse({ status: 200, description: 'Archivo de template' })
+  @ApiResponse({ status: 404, description: 'Template no encontrado' })
+  downloadTemplate(@Param('id') id: string, @Res() res: Response) {
+    if (!id) {
+      throw new BadRequestException('ID del template es requerido');
+    }
+
+    if (!this.templateService.templateExists(id)) {
+      throw new NotFoundException(`Template con ID '${id}' no encontrado`);
+    }
+
+    const templatePath = this.templateService.findTemplate(id);
+    const templates = this.templateService.listTemplatesWithMetadata();
+    const templateInfo = templates.find((t) => t.id === id || t.name === id);
+
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    );
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${templateInfo?.name || id}"`,
+    );
+
+    return res.sendFile(templatePath);
   }
 
   /**
@@ -155,6 +201,11 @@ export class TemplateController {
     const templateInfo = templates.find((t) => t.id === id || t.name === id);
 
     this.templateService.deleteTemplate(id);
+
+    this.eventEmitter.emit('plantilla.eliminada', {
+      id: templateInfo?.id || id,
+      name: templateInfo?.name || id,
+    });
 
     return {
       success: true,

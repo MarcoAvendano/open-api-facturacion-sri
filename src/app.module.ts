@@ -26,7 +26,6 @@ import { RolesGuard } from './modules/auth/guards/roles.guard';
 import { TemplateModule } from './modules/template/template.module';
 import { PdfModule } from './modules/pdf/pdf.module';
 import { CertificateModule } from './modules/certificate/certificate.module';
-import { SignatureModule } from './modules/signature/signature.module';
 import { DocumentModule } from './modules/document/document.module';
 import { ImageModule } from './modules/image/image.module';
 import { StatusModule } from './modules/status/status.module';
@@ -35,6 +34,8 @@ import { EmisoresModule } from './modules/emisores/emisores.module';
 import { WebhooksModule } from './modules/webhooks/webhooks.module';
 import { TenantsModule } from './modules/tenants/tenants.module';
 import { PuntosEmisionModule } from './modules/puntos-emision/puntos-emision.module';
+import { RealtimeModule } from './modules/realtime/realtime.module';
+import { CatalogosModule } from './modules/catalogos/catalogos.module';
 
 import { EventEmitterModule } from '@nestjs/event-emitter';
 
@@ -107,7 +108,6 @@ import { EventEmitterModule } from '@nestjs/event-emitter';
     TemplateModule,
     PdfModule,
     CertificateModule,
-    SignatureModule,
     DocumentModule,
     ImageModule,
     StatusModule,
@@ -116,6 +116,8 @@ import { EventEmitterModule } from '@nestjs/event-emitter';
     WebhooksModule,
     TenantsModule,
     PuntosEmisionModule,
+    RealtimeModule,
+    CatalogosModule,
   ],
   providers: [
     // Guard JWT global — protege todos los endpoints excepto @Public()

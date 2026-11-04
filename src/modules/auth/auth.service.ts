@@ -81,8 +81,8 @@ export class AuthService {
         throw new UnauthorizedException('Token inválido para refrescar sesión');
       }
 
-      // Validar que el usuario sigue activo en la BD
-      await this.validatePayload(payload);
+      // Validar que el usuario sigue activo en la BD (permitir refresh tokens)
+      await this.validatePayload(payload, true);
 
       return this.generateTokens(payload);
     } catch (error: any) {
@@ -187,6 +187,33 @@ export class AuthService {
   }
 
   /**
+   * Obtiene el perfil del usuario desde la BD (datos frescos, no del JWT)
+   */
+  async getProfile(userId: string) {
+    const user = await this.db.queryOne<any>(
+      `SELECT u.id, u.email, u.rol, u.tenant_id, u.activo,
+              t.nombre as tenant_nombre
+       FROM usuarios u
+       LEFT JOIN tenants t ON t.id = u.tenant_id
+       WHERE u.id = $1`,
+      [userId],
+    );
+
+    if (!user) {
+      throw new NotFoundException('Usuario no encontrado');
+    }
+
+    return {
+      id: user.id,
+      email: user.email,
+      rol: user.rol,
+      tenantId: user.tenant_id,
+      tenantNombre: user.tenant_nombre ?? null,
+      activo: user.activo,
+    };
+  }
+
+  /**
    * Cambia la contraseña del usuario actual
    */
   async changePassword(
@@ -220,7 +247,7 @@ export class AuthService {
   /**
    * Valida un payload JWT y retorna el usuario (usado por JwtStrategy)
    */
-  async validatePayload(payload: JwtPayload): Promise<JwtPayload> {
+  async validatePayload(payload: JwtPayload, allowRefreshToken = false): Promise<JwtPayload> {
     const user = await this.db.queryOne<{ id: string; activo: boolean }>(
       'SELECT id, activo FROM usuarios WHERE id = $1',
       [payload.sub],
@@ -230,7 +257,7 @@ export class AuthService {
       throw new UnauthorizedException('Token inválido o usuario inactivo');
     }
 
-    if (payload.type === 'refresh') {
+    if (payload.type === 'refresh' && !allowRefreshToken) {
       // Las estrategias de autenticación normales (JWT Guard) no deberían aceptar refresh tokens
       throw new UnauthorizedException('Token de refresco no permitido para acceder a recursos');
     }

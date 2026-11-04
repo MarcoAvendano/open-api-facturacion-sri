@@ -8,6 +8,8 @@ import {
   Param,
   Query,
   Logger,
+  NotFoundException,
+  ParseUUIDPipe,
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -18,6 +20,7 @@ import {
 } from '@nestjs/swagger';
 import { WebhooksService } from './webhooks.service';
 import { EmisoresService } from '../emisores/emisores.service';
+import { DatabaseService } from '../../database/database.service';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { JwtPayload, UserRole } from '../auth/dto/auth.dto';
 import {
@@ -37,7 +40,22 @@ export class WebhooksController {
   constructor(
     private readonly webhooksService: WebhooksService,
     private readonly emisoresService: EmisoresService,
+    private readonly db: DatabaseService,
   ) {}
+
+  private async validateWebhookOwnership(
+    webhookId: string,
+    user: JwtPayload,
+  ): Promise<void> {
+    if (user.rol === UserRole.SUPERADMIN) return;
+    const row = await this.db.queryOne<{ tenant_id: string | null }>(
+      `SELECT tenant_id FROM webhook_configs WHERE id = $1`,
+      [webhookId],
+    );
+    if (!row || !row.tenant_id || row.tenant_id !== user.tenantId) {
+      throw new NotFoundException(`Webhook con ID ${webhookId} no encontrado`);
+    }
+  }
 
   @Get('eventos')
   @ApiOperation({ summary: 'Listar eventos disponibles para webhooks' })
@@ -53,6 +71,8 @@ export class WebhooksController {
           'Cuando un comprobante es rechazado por el SRI',
         'comprobante.anulado': 'Cuando un comprobante es anulado',
         'comprobante.enviado': 'Cuando un comprobante es enviado al SRI',
+        'comprobante.persistencia_fallida':
+          'Cuando falla la persistencia de un comprobante autorizado',
         'certificado.por_vencer':
           'Cuando un certificado está por vencer (30 días)',
         'certificado.vencido': 'Cuando un certificado ha vencido',
@@ -95,7 +115,11 @@ export class WebhooksController {
     type: WebhookResponseDto,
   })
   @ApiResponse({ status: 404, description: 'Webhook no encontrado' })
-  async findOne(@Param('id') id: string): Promise<WebhookResponseDto> {
+  async findOne(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: JwtPayload,
+  ): Promise<WebhookResponseDto> {
+    await this.validateWebhookOwnership(id, user);
     return this.webhooksService.findOne(id);
   }
 
@@ -127,9 +151,11 @@ export class WebhooksController {
   })
   @ApiResponse({ status: 404, description: 'Webhook no encontrado' })
   async update(
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: UpdateWebhookDto,
+    @CurrentUser() user: JwtPayload,
   ): Promise<WebhookResponseDto> {
+    await this.validateWebhookOwnership(id, user);
     return this.webhooksService.update(id, dto);
   }
 
@@ -144,7 +170,11 @@ export class WebhooksController {
     status: 404,
     description: 'Webhook no encontrado o ya inactivo',
   })
-  async delete(@Param('id') id: string): Promise<WebhookResponseDto> {
+  async delete(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: JwtPayload,
+  ): Promise<WebhookResponseDto> {
+    await this.validateWebhookOwnership(id, user);
     return this.webhooksService.delete(id);
   }
 
@@ -156,7 +186,11 @@ export class WebhooksController {
     type: WebhookResponseDto,
   })
   @ApiResponse({ status: 404, description: 'Webhook no encontrado' })
-  async regenerateSecret(@Param('id') id: string): Promise<WebhookResponseDto> {
+  async regenerateSecret(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: JwtPayload,
+  ): Promise<WebhookResponseDto> {
+    await this.validateWebhookOwnership(id, user);
     return this.webhooksService.regenerateSecret(id);
   }
 
@@ -180,7 +214,8 @@ export class WebhooksController {
   })
   @ApiResponse({ status: 404, description: 'Webhook no encontrado' })
   async getLogs(
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: JwtPayload,
     @Query('page') page?: number,
     @Query('limit') limit?: number,
   ): Promise<{
@@ -189,6 +224,7 @@ export class WebhooksController {
     page: number;
     totalPages: number;
   }> {
+    await this.validateWebhookOwnership(id, user);
     return this.webhooksService.getLogs(
       id,
       Number(page) || 1,

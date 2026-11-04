@@ -16,6 +16,7 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
 import { unlinkSync, existsSync, readFileSync } from 'fs';
 import { join } from 'path';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import {
   ApiTags,
   ApiOperation,
@@ -40,7 +41,7 @@ import { EncryptionService } from '../../common/services/encryption.service';
 import { XmlSignerService } from '../sri/services/xml-signer.service';
 import { EmisoresService } from '../emisores/emisores.service';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
-import { JwtPayload } from '../auth/dto/auth.dto';
+import { JwtPayload, UserRole } from '../auth/dto/auth.dto';
 
 @ApiTags('Certificates')
 @ApiBearerAuth('JWT')
@@ -54,6 +55,7 @@ export class CertificateController {
     private readonly encryptionService: EncryptionService,
     private readonly xmlSignerService: XmlSignerService,
     private readonly emisoresService: EmisoresService,
+    private readonly eventEmitter: EventEmitter2,
   ) {}
 
   /**
@@ -69,7 +71,7 @@ export class CertificateController {
     description: 'Elementos por página',
   })
   @ApiResponse({ status: 200, description: 'Lista de certificados' })
-  listCertificates(
+  async listCertificates(
     @Query('page') page?: string,
     @Query('limit') limit?: string,
   ) {
@@ -79,10 +81,33 @@ export class CertificateController {
 
     const result = this.certificateService.listCertificates(options);
 
+    // Enriquecer con info de emisor vinculado desde la BD
+    const certsWithEmisor = await Promise.all(
+      result.certificates.map(async (cert) => {
+        const emisor = await this.db.queryOne<{
+          ruc: string;
+          razon_social: string;
+          certificado_valido_hasta: Date | null;
+          certificado_sujeto: string | null;
+        }>(
+          `SELECT ruc, razon_social, certificado_valido_hasta, certificado_sujeto
+           FROM emisores WHERE certificado_nombre = $1 LIMIT 1`,
+          [cert.name],
+        );
+        return {
+          ...cert,
+          emisorRuc: emisor?.ruc || null,
+          emisorRazonSocial: emisor?.razon_social || null,
+          validoHasta: emisor?.certificado_valido_hasta || null,
+          sujeto: emisor?.certificado_sujeto || null,
+        };
+      }),
+    );
+
     return {
       success: true,
       data: {
-        certificates: result.certificates,
+        certificates: certsWithEmisor,
         total: result.total,
         pagination: result.pagination,
       },
@@ -98,7 +123,10 @@ export class CertificateController {
   @ApiParam({ name: 'fileName', description: 'Nombre del archivo .p12' })
   @ApiResponse({ status: 200, description: 'Certificado eliminado' })
   @ApiResponse({ status: 404, description: 'Certificado no encontrado' })
-  async deleteCertificate(@Param('fileName') fileName: string) {
+  async deleteCertificate(
+    @Param('fileName') fileName: string,
+    @CurrentUser() user: JwtPayload,
+  ) {
     if (!fileName || !fileName.toLowerCase().endsWith('.p12')) {
       throw new BadRequestException(
         'Nombre de archivo inválido. Debe tener extensión .p12',
@@ -107,6 +135,16 @@ export class CertificateController {
 
     if (!this.certificateService.certificateExists(fileName)) {
       throw new NotFoundException(`El certificado ${fileName} no existe`);
+    }
+
+    if (user.rol !== UserRole.SUPERADMIN) {
+      const owner = await this.db.queryOne<{ tenant_id: string | null }>(
+        `SELECT tenant_id FROM emisores WHERE certificado_nombre = $1 LIMIT 1`,
+        [fileName],
+      );
+      if (!owner || !owner.tenant_id || owner.tenant_id !== user.tenantId) {
+        throw new NotFoundException(`El certificado ${fileName} no existe`);
+      }
     }
 
     // Limpiar datos del certificado en la tabla emisores
@@ -132,6 +170,11 @@ export class CertificateController {
     this.logger.log(
       `Certificado ${fileName} eliminado. Emisores actualizados: ${emisoresLimpiados}`,
     );
+
+    this.eventEmitter.emit('certificado.eliminado', {
+      fileName,
+      emisoresActualizados: emisoresLimpiados,
+    });
 
     return {
       success: true,
@@ -195,7 +238,7 @@ export class CertificateController {
       throw new BadRequestException('No se proporcionó ningún archivo');
     }
 
-    const { password } = body;
+    const { password, ruc } = body;
 
     if (!password) {
       // Delete uploaded file if no password
@@ -208,6 +251,20 @@ export class CertificateController {
         'Se requiere la contraseña del certificado para validar su vigencia',
       );
     }
+
+    if (!ruc) {
+      const filePath = join(STORAGE_PATHS.certs, file.filename);
+      if (existsSync(filePath)) {
+        unlinkSync(filePath);
+      }
+
+      throw new BadRequestException(
+        'El RUC del emisor es obligatorio para vincular el certificado',
+      );
+    }
+
+    // Validar acceso tenant antes de procesar
+    await this.emisoresService.validateRucAccess(ruc, user);
 
     try {
       // Validate certificate expiry
@@ -252,38 +309,39 @@ export class CertificateController {
         response.data.warning = validation.warning;
       }
 
-      // If RUC is provided, bind certificate to emisor
-      if (body.ruc) {
-        // Validar acceso tenant antes de bindear
-        await this.emisoresService.validateRucAccess(body.ruc, user);
+      this.eventEmitter.emit('certificado.subido', {
+        fileName: file.filename,
+        size: file.size,
+        subject: validation.subject?.commonName || '',
+        tenantId: user.tenantId,
+      });
 
-        // Read the P12 file to get the buffer for database storage
-        const filePath = join(STORAGE_PATHS.certs, file.filename);
-        const p12Buffer = readFileSync(filePath);
+      // Bind certificate to emisor (mandatory)
+      const filePath = join(STORAGE_PATHS.certs, file.filename);
+      const p12Buffer = readFileSync(filePath);
 
-        const bindingResult = await this.bindCertificateToEmisor(
-          body.ruc,
-          file.filename,
-          password,
-          validation.expiryDate,
-          validation.subject?.commonName || '',
-          p12Buffer,
+      const bindingResult = await this.bindCertificateToEmisor(
+        ruc,
+        file.filename,
+        password,
+        validation.expiryDate,
+        validation.subject?.commonName || '',
+        p12Buffer,
+      );
+
+      if (bindingResult.success) {
+        response.data.emisorBinding = {
+          ruc: ruc,
+          message: 'Certificado vinculado al emisor correctamente',
+        };
+        this.logger.log(
+          `Certificado ${file.filename} vinculado al emisor RUC: ${ruc}`,
         );
-
-        if (bindingResult.success) {
-          response.data.emisorBinding = {
-            ruc: body.ruc,
-            message: 'Certificado vinculado al emisor correctamente',
-          };
-          this.logger.log(
-            `Certificado ${file.filename} vinculado al emisor RUC: ${body.ruc}`,
-          );
-        } else {
-          response.data.emisorBindingWarning = bindingResult.message;
-          this.logger.warn(
-            `No se pudo vincular certificado: ${bindingResult.message}`,
-          );
-        }
+      } else {
+        response.data.emisorBindingWarning = bindingResult.message;
+        this.logger.warn(
+          `No se pudo vincular certificado: ${bindingResult.message}`,
+        );
       }
 
       return response;
@@ -420,10 +478,17 @@ export class CertificateController {
       );
     }
 
-    const validation = this.certificateService.validateCertificateExpiry(
-      fileName,
-      password,
-    );
+    let validation;
+    try {
+      validation = this.certificateService.validateCertificateExpiry(
+        fileName,
+        password,
+      );
+    } catch (error) {
+      throw new BadRequestException(
+        `No se pudo validar el certificado. Verifique la contraseña. ${error.message || ''}`,
+      );
+    }
 
     const response: any = {
       success: true,
